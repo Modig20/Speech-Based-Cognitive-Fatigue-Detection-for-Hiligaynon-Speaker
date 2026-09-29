@@ -1,4 +1,7 @@
+import json
 import uuid
+from urllib.error import URLError
+from urllib.request import urlopen
 
 import streamlit as st
 
@@ -8,16 +11,20 @@ st.markdown(
     """
     <style>
         .block-container { padding-top: 2rem; }
+        h1, h2, h3 { color: #1D4ED8; }
+        h1 { border-left: 5px solid #2563EB; padding-left: 0.75rem; }
         .wizard-shell {
             background: #FFFFFF;
-            border: 1px solid rgba(148, 163, 184, 0.25);
+            border: 1px solid rgba(37, 99, 235, 0.18);
+            border-top: 4px solid #2563EB;
             border-radius: 18px;
             padding: 1.5rem;
             box-shadow: 0 12px 24px rgba(15, 23, 42, 0.04);
         }
         .metric-card {
             background: linear-gradient(135deg, #ffffff 0%, #f8fbff 100%);
-            border: 1px solid rgba(37, 99, 235, 0.08);
+            border: 1px solid rgba(37, 99, 235, 0.16);
+            border-left: 4px solid #2563EB;
             border-radius: 18px;
             padding: 1rem 1.25rem;
             margin-bottom: 1rem;
@@ -34,7 +41,28 @@ st.markdown(
         .status-low { background: rgba(16, 185, 129, 0.12); color: #047857; }
         .status-moderate { background: rgba(245, 158, 11, 0.14); color: #b45309; }
         .status-high { background: rgba(239, 68, 68, 0.12); color: #b91c1c; }
-        div[data-testid="stFileUploaderDropzone"] { border-radius: 14px; }
+        div[data-testid="stFileUploaderDropzone"] {
+            border: 1px dashed #60A5FA;
+            border-radius: 14px;
+            background: #EFF6FF;
+        }
+        div[data-testid="stFileUploaderDropzone"]:hover { border-color: #2563EB; }
+        div.stButton > button[kind="primary"] {
+            background: #2563EB;
+            border-color: #2563EB;
+            color: #FFFFFF;
+        }
+        div.stButton > button[kind="primary"]:hover {
+            background: #1D4ED8;
+            border-color: #1D4ED8;
+        }
+        div[data-testid="stProgress"] > div > div > div { background: #2563EB; }
+        div[data-baseweb="select"] > div:focus-within,
+        div[data-baseweb="input"]:focus-within,
+        div[data-testid="stTextInput"] input:focus {
+            border-color: #2563EB;
+            box-shadow: 0 0 0 1px #2563EB;
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -43,15 +71,28 @@ st.markdown(
 
 DEFAULTS = {
     "session_id": str(uuid.uuid4()),
-    "respondent_id": "",
+    "respondent_id": f"WVSU-{uuid.uuid4().hex}",
     "language": "Hiligaynon",
-    "current_step": 1,
+    "current_step": 0,
+    "task_index": 0,
     "current_task_level": "Easy",
     "recorded_audio_bytes": None,
+    "task_recordings": {},
     "samn_perelli_rating": None,
+    "task_ratings": {},
     "inference_results": {},
     "consent_accepted": False,
     "post_debrief_consent": False,
+    "post_debrief_choice": None,
+    "post_debrief_choice": None,
+    "birthplace": "",
+    "birthplace_scope": "western_visayas",
+    "birthplace_province_code": "063000000",
+    "birthplace_needs_review": False,
+    "birthplace_manual_text": "",
+    "native_language": None,
+    "hiligaynon_frequency_score": 3,
+    "screening_errors": [],
 }
 
 
@@ -59,238 +100,862 @@ for key, value in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
+if not st.session_state.respondent_id:
+    st.session_state.respondent_id = f"WVSU-{uuid.uuid4().hex}"
+
 
 TASK_LEVELS = ["Easy", "Moderate", "Intensive"]
 SAMN_SCALE = [1, 2, 3, 4, 5, 6, 7]
+LANGUAGES = ["Hiligaynon", "English"]
+NATIVE_LANGUAGES = ["Hiligaynon", "Kinaray-a", "Filipino", "English", "Other"]
+WESTERN_VISAYAS_PROVINCES = {
+    "060400000": "Aklan",
+    "060600000": "Antique",
+    "061900000": "Capiz",
+    "063000000": "Iloilo",
+    "064500000": "Negros Occidental",
+    "067900000": "Guimaras",
+}
+SCREENING_TEXT = {
+    "English": {
+        "language_label": "Preferred language / Pinili nga lenguahe",
+        "step": "Step 2 · Screening",
+        "intro": "Complete the required participant screening fields. The study is currently recruiting native Hiligaynon speakers.",
+        "language": "Preferred language for the rest of the questionnaire",
+        "respondent_id": "Confidential participant code (generated automatically)",
+        "birthplace": "City or municipality of birth (required)",
+        "birthplace_scope": "Where were you born?",
+        "birthplace_scopes": {"western_visayas": "Western Visayas", "philippines": "Elsewhere in the Philippines", "outside_ph": "Outside the Philippines"},
+        "birthplace_manual": "Enter your birthplace for researcher verification",
+        "birthplace_pending": "This location will be marked for manual verification; it is not checked against the PSGC.",
+        "birthplace_province": "Province",
+        "birthplace_locality": "City or municipality",
+        "birthplace_unavailable": "The official locality list is unavailable. Check your connection and try again; you cannot continue without a verified selection.",
+        "native_language": "Primary native language (required)",
+        "frequency": "How often do you speak Hiligaynon daily? (required)",
+        "frequency_anchor": "1 · Rarely     2 · Sometimes     3 · About half the day     4 · Often     5 · Almost always",
+        "frequency_selected": "Selected frequency: {value} · {anchor}",
+        "frequency_values": ["Rarely", "Sometimes", "About half the day", "Often", "Almost always"],
+        "previous": "Previous",
+        "next": "Next",
+        "required_birthplace": "Enter your birthplace.",
+        "required_manual_birthplace": "Enter your birthplace, or select a Philippine locality.",
+        "invalid_birthplace": "Select a city or municipality from the official list.",
+        "required_native": "Select your primary native language.",
+        "ineligible": "This study is currently limited to native Hiligaynon speakers. You cannot continue with the selected language.",
+        "native_names": {"Hiligaynon": "Hiligaynon", "Kinaray-a": "Kinaray-a", "Filipino": "Filipino", "English": "English", "Other": "Other"},
+    },
+    "Hiligaynon": {
+        "step": "Lakang 2 · Screening",
+        "intro": "Kompletoha ang mga kinahanglanon nga impormasyon. Sa subong, nagapangita ang pagtuon sang mga lumad nga manughambal sang Hiligaynon.",
+        "language": "Pinili nga lenguahe para sa nabilin nga questionnaire",
+        "respondent_id": "Kompidensyal nga kodigo sang partisipante (ginhimo sing automatic)",
+        "birthplace": "Syudad ukon munisipalidad nga natawhan (kinahanglan)",
+        "birthplace_scope": "Diin ka natawhan?",
+        "birthplace_scopes": {"western_visayas": "Western Visayas", "philippines": "Sa iban nga bahin sang Pilipinas", "outside_ph": "Sa guwa sang Pilipinas"},
+        "birthplace_manual": "Isulat ang lugar nga natawhan para mapanghimatuudan sang manug-usisa",
+        "birthplace_pending": "Markahan ini nga lugar para panghimatuudan sang manug-usisa; wala ini nasusi sa PSGC.",
+        "birthplace_province": "Probinsya",
+        "birthplace_locality": "Syudad ukon munisipalidad",
+        "birthplace_unavailable": "Indi makuha ang opisyal nga listahan sang mga lugar. Usisaa ang koneksyon kag magtilaw liwat; indi ka makapadayon kon wala sing napilian nga ginpanghimatuudan.",
+        "native_language": "Pangunahon nga lumad nga lenguahe (kinahanglan)",
+        "frequency": "Daw ano ka permi ka nagahambal sang Hiligaynon kada adlaw? (kinahanglan)",
+        "frequency_anchor": "1 · Talagsa     2 · Kon kaisa     3 · Mga tunga sang adlaw     4 · Perme     5 · Halos permi",
+        "frequency_selected": "Napilian nga kadamuon: {value} · {anchor}",
+        "frequency_values": ["Talagsa", "Kon kaisa", "Mga tunga sang adlaw", "Perme", "Halos permi"],
+        "previous": "Balik",
+        "next": "Sunod",
+        "required_birthplace": "Isulat ang lugar nga natawhan.",
+        "required_manual_birthplace": "Isulat ang lugar nga natawhan ukon magpili sang lugar sa Pilipinas.",
+        "invalid_birthplace": "Pilia ang syudad ukon munisipalidad halin sa opisyal nga listahan.",
+        "required_native": "Pilia ang pangunahon nga lumad nga lenguahe.",
+        "ineligible": "Para lamang ini subong sa mga lumad nga manughambal sang Hiligaynon. Indi ka makapadayon sa napilian nga lenguahe.",
+        "native_names": {"Hiligaynon": "Hiligaynon", "Kinaray-a": "Kinaray-a", "Filipino": "Filipino", "English": "Ingles", "Other": "Iban pa"},
+    },
+}
+SCREENING_TEXT["English"]["native_names"] = {
+    "Hiligaynon": "Hiligaynon", "Kinaray-a": "Kinaray-a", "Filipino": "Filipino", "English": "English", "Other": "Other"
+}
+UI_TEXT = {
+    "English": {
+        "step_task": "Step 3 · Cognitive Tasks",
+        "task_level": "Select task level",
+        "task_names": {"Easy": "Easy", "Moderate": "Moderate", "Intensive": "Intensive"},
+        "task_instructions": "Read the prompt and answer aloud. Explain your reasoning as you work.",
+        "prompt_label": "Prompt",
+        "draft_notice": "Prompt wording and difficulty progression are drafts; confirm them against the approved thesis protocol before participant recruitment.",
+        "upload": "Upload or record speech audio",
+        "upload_help": "Accepted formats: WAV, MP3, M4A, and OGG.",
+        "audio_ready": "Audio is ready for this task.",
+        "audio_required": "Upload a recording before continuing.",
+        "audio_error": "The audio file is empty. Upload a non-empty recording to continue.",
+        "next_rating": "Next · Fatigue rating",
+        "step_rating": "Step 4 · Samn–Perelli Fatigue Rating",
+        "rating_intro": "Rate your current fatigue level immediately after the task.",
+        "rating_prompt": "Choose the description that best matches how you feel.",
+        "rating_anchors": ["Fully alert, wide awake", "Very lively, responsive", "Okay, somewhat fresh", "A little tired", "Moderately tired", "Extremely tired", "Completely exhausted"],
+        "next_debrief": "Next · Debriefing",
+        "step_debrief": "Step 5 · Debriefing",
+        "thanks": "Thank you for completing the task.",
+        "disclosure_title": "Disclosure",
+        "disclosure": "The true target of this study is cognitive fatigue as reflected in speech. The task prompts were used to elicit speech while varying cognitive effort; this specific focus was not fully explained before the task to reduce response bias.",
+        "withdrawal": "You may now ask questions or withdraw. Your recording and responses were sent to the application server for processing in this session, but this prototype does not save them to a research database or submit them for analysis.",
+        "participant_code": "Confidential participant code",
+        "task_label": "Task level",
+        "rating_label": "Samn–Perelli rating",
+        "recording_label": "Recording",
+        "recording_present": "Uploaded",
+        "recording_missing": "Not uploaded",
+        "no_rating": "Not provided",
+        "post_consent": "After learning the true purpose, I agree that my data may be used for the study.",
+        "post_consent_yes": "Your agreement is noted in this active session only. This prototype does not save data to a research database or submit it for analysis.",
+        "post_consent_no": "Choosing this option clears your active session answers and uploaded recordings.",
+        "reset": "Reset session",
+        "native_names": {"Hiligaynon": "Hiligaynon", "Kinaray-a": "Kinaray-a", "Filipino": "Filipino", "English": "English", "Other": "Other"},
+        "scale_labels": ["1 · Fully alert", "2 · Very lively", "3 · Okay, somewhat fresh", "4 · A little tired", "5 · Moderately tired", "6 · Extremely tired", "7 · Completely exhausted"],
+    },
+    "Hiligaynon": {
+        "language_label": "Pinili nga lenguahe / Preferred language",
+        "step_task": "Lakang 3 · Mga Buluhaton sa Panghunahuna",
+        "task_level": "Pilia ang kabudlayon sang buluhaton",
+        "task_names": {"Easy": "Mahapos", "Moderate": "Katamtaman", "Intensive": "Mabudlay"},
+        "task_instructions": "Basaha ang pamangkot kag sabta ini paagi sa paghambal. Ipaathag ang imo panghunahuna samtang nagasabat.",
+        "prompt_label": "Pamangkot",
+        "draft_notice": "Draft pa ang mga pulong kag kabudlayon sang buluhaton; ipasibu ini sa gin-aprubahan nga thesis protocol antes mag-recruit sang partisipante.",
+        "upload": "Mag-upload ukon magrekord sang audio sang paghambal",
+        "upload_help": "WAV, MP3, M4A, kag OGG lamang.",
+        "audio_ready": "Andam na ang audio para sa sini nga buluhaton.",
+        "audio_required": "Mag-upload sang recording antes magpadayon.",
+        "audio_error": "Wala sing sulod ang audio file. Mag-upload sang recording nga may sulod agod makapadayon.",
+        "next_rating": "Sunod · Marka sang kakapoy",
+        "step_rating": "Lakang 4 · Marka sang Kakapoy nga Samn–Perelli",
+        "rating_intro": "Markahi ang imo kakapoy pagkatapos gid sang buluhaton.",
+        "rating_prompt": "Pilia ang deskripsyon nga pinakabagay sa imo pamatyag.",
+        "rating_anchors": ["Bugtaw gid", "Buhi kag madinalag-on", "Maayo kag medyo presko", "Medyo kapoy", "Kasarang nga kapoy", "Kapoy gid", "Gid-ka-kapoy"],
+        "next_debrief": "Sunod · Pagpaathag pagkatapos sang buluhaton",
+        "step_debrief": "Lakang 5 · Pagpaathag pagkatapos sang buluhaton",
+        "thanks": "Salamat sa paghuman sang buluhaton.",
+        "disclosure_title": "Pagpahayag",
+        "disclosure": "Ang matuod nga ginatuon sang sini nga pagtuon amo ang kakapoy sang panghunahuna nga makita sa paghambal. Gin-gamit ang mga buluhaton agod makakuha sang mga halimbawa sang paghambal samtang nagabag-o ang panikasog sang panghunahuna; wala ginpaathag sing bug-os ang sini nga tuyo antes sang buluhaton agod malikawan ang pagbag-o sang sabat.",
+        "withdrawal": "Mahimo ka mamangkot ukon magbiya sa pagtuon. Ginpadala sa application server ang imo recording kag mga sabat agod maproseso sa sini nga sesyon, pero wala ini ginatipigan sang prototype sa database sang pagtuon ukon ginapasa para sa pag-usisa.",
+        "participant_code": "Kompidensyal nga kodigo sang partisipante",
+        "task_label": "Kabudlayon sang buluhaton",
+        "rating_label": "Marka nga Samn–Perelli",
+        "recording_label": "Recording",
+        "recording_present": "Na-upload",
+        "recording_missing": "Wala na-upload",
+        "no_rating": "Wala ginhatag",
+        "post_consent": "Pagkatapos mahibaluan ang matuod nga katuyuan, nagauyon ako nga gamiton ang akon datos para sa pagtuon.",
+        "post_consent_yes": "Narekord ang imo pag-uyon sa aktibo nga sesyon lamang. Wala ginatipigan sang prototype ang datos sa database sang pagtuon ukon ginapasa ini para usisaon.",
+        "post_consent_no": "Kon pilion ini, kuhaon ang aktibo nga mga sabat kag recording sa sesyon.",
+        "reset": "Sugdan liwat ang sesyon",
+        "native_names": {"Hiligaynon": "Hiligaynon", "Kinaray-a": "Kinaray-a", "Filipino": "Filipino", "English": "Ingles", "Other": "Iban pa"},
+        "scale_labels": ["1 · Bugtaw gid", "2 · Buhi kag madinalag-on", "3 · Maayo kag medyo presko", "4 · Medyo kapoy", "5 · Kasarang nga kapoy", "6 · Kapoy gid", "7 · Gid-ka-kapoy"],
+    },
+}
 SAMN_LABELS = {
-    1: "Bugtaw gid / Fully alert, wide awake",
-    2: "Buhi kag masaligon, pero indi pa pinakamaayo / Very lively, responsive, but not at peak",
-    3: "Maayo ang pamatyag kag medyo presko / Okay, somewhat fresh",
-    4: "Medyo kapoy, indi na pareho ka-presko / A little tired, less than fresh",
-    5: "Kasarang nga kapoy kag daw naluya / Moderately tired, let down",
-    6: "Kapoy gid kag mabudlay magkonsentrar / Extremely tired, very difficult to concentrate",
-    7: "Gid-ka-kapoy kag indi na makatrabaho sing epektibo / Completely exhausted, unable to function effectively",
+    "English": ["Fully alert, wide awake", "Very lively, responsive, but not at peak", "Okay, somewhat fresh", "A little tired, less than fresh", "Moderately tired, let down", "Extremely tired, very difficult to concentrate", "Completely exhausted, unable to function effectively"],
+    "Hiligaynon": ["Bugtaw gid", "Buhi kag masaligon, pero indi pa pinakamaayo", "Maayo ang pamatyag kag medyo presko", "Medyo kapoy, indi na pareho ka-presko", "Kasarang nga kapoy kag daw naluya", "Kapoy gid kag mabudlay magkonsentrar", "Gid-ka-kapoy kag indi na makatrabaho sing epektibo"],
+}
+FLOW_TEXT = {
+    "English": {
+        "app_title": "Participant Data Collection",
+        "language_label": "Preferred language",
+        "language_title": "Choose your language",
+        "language_intro": "Select the language you prefer for the consent form and the entire questionnaire.",
+        "language_continue": "Continue to consent",
+        "consent_title": "Step 1 · Informed Consent",
+        "consent_ack": "I have read and understood this information, and I voluntarily agree to participate.",
+        "consent_next": "Agree and continue",
+        "consent_notice": "The Hiligaynon translation is a draft. Have a fluent speaker and the approving ethics committee review it before recruitment.",
+        "progress": ["Language", "Consent", "Screening", "Tasks", "Debrief"],
+        "task_order": "Task {number} of 3 · {task}",
+        "task_complete": "Recording ready. You will rate fatigue immediately after this task.",
+        "recording_present": "Uploaded",
+        "recording_missing": "Not uploaded",
+        "upload_title": "Upload speech recording",
+        "upload_help": "Choose the speech recording for this task. Supported: WAV, MP3, M4A, OGG. Maximum upload size: 50 MB. Re-uploading replaces this task's recording only.",
+        "next_rating": "Continue to fatigue rating",
+        "rating_order": "Fatigue rating {number} of 3",
+        "next_task": "Save rating and continue to next task",
+        "finish_tasks": "Save rating and continue to debriefing",
+        "frequency_values": ["Rarely", "Sometimes", "About half the day", "Often", "Almost always"],
+        "withdraw": "Withdraw and clear this session",
+        "withdraw_title": "Session withdrawn",
+        "withdraw_body": "Your active questionnaire answers and task recordings have been cleared from this app session. No research database is connected in this prototype.",
+        "post_consent_prompt": "After this disclosure, do you agree to the use of these data for the study?",
+        "post_consent_options": {"agree": "I agree", "decline": "I do not agree; clear my session data"},
+        "finish_debrief": "Confirm choice",
+        "complete_title": "Questionnaire complete",
+        "complete_body": "Your choice was noted in this active session only. This prototype does not save data to a research database or submit it for analysis.",
+        "declined_title": "Session data cleared",
+        "declined_body": "You declined post-debriefing data use. Active session answers and uploaded recordings have been cleared.",
+        "reset": "Start a new session",
+        "manual_birthplace_notice": "This location is pending researcher verification; do not treat it as PSGC-verified.",
+        "birthplace_other": "Enter a birthplace for verification",
+    },
+    "Hiligaynon": {
+        "app_title": "Pagkolekta sang Datos sang Partisipante",
+        "language_label": "Pinili nga lenguahe",
+        "language_title": "Pilia ang imo lenguahe",
+        "language_intro": "Pilia ang lenguahe nga gusto mo gamiton sa consent form kag sa bug-os nga questionnaire.",
+        "language_continue": "Padayon sa consent",
+        "consent_title": "Lakang 1 · Pagtugot nga May Kahibalo",
+        "consent_ack": "Nabasa ko kag naintindihan ang impormasyon; boluntaryo ako nga nagauyon mag-apil.",
+        "consent_next": "Nagauyon ako kag magapadayon",
+        "consent_notice": "Draft pa ang Hiligaynon nga hubad. Ipasusi ini sa maayo maghambal sang Hiligaynon kag sa ethics committee antes mag-recruit.",
+        "progress": ["Lenguahe", "Consent", "Screening", "Mga Buluhaton", "Pagpaathag"],
+        "task_order": "Buluhaton {number} sa 3 · {task}",
+        "task_complete": "Andam na ang recording. Markahi ang kakapoy pagkatapos gid sini nga buluhaton.",
+        "recording_present": "Na-upload",
+        "recording_missing": "Wala na-upload",
+        "upload_title": "Mag-upload sang recording sang paghambal",
+        "upload_help": "Pilia ang recording sang paghambal para sa sini nga buluhaton. Ginasuportahan: WAV, MP3, M4A, OGG. Pinakadaku nga upload: 50 MB. Ang bag-o nga file magailis lamang sang recording para sa sini nga buluhaton.",
+        "next_rating": "Padayon sa marka sang kakapoy",
+        "rating_order": "Marka sang kakapoy {number} sa 3",
+        "next_task": "Itipig ang marka kag padayon sa masunod nga buluhaton",
+        "finish_tasks": "Itipig ang marka kag padayon sa pagpaathag",
+        "frequency_values": ["Talagsa", "Kon kaisa", "Mga tunga sang adlaw", "Perme", "Halos permi"],
+        "withdraw": "Magbiya kag kuhaa ang datos sa sini nga sesyon",
+        "withdraw_title": "Nagbiya ka sa sesyon",
+        "withdraw_body": "Ginkuha na ang imo mga sabat kag recording sa aktibo nga sesyon sang app. Wala konektado nga database sang pagtuon sa sini nga prototype.",
+        "post_consent_prompt": "Pagkatapos sini nga pagpaathag, nagauyon ka bala nga gamiton ang datos para sa pagtuon?",
+        "post_consent_options": {"agree": "Nagauyon ako", "decline": "Indi ako nagauyon; kuhaa ang akon datos sa sesyon"},
+        "finish_debrief": "Kumpirmahon ang akon pilian",
+        "complete_title": "Natapos ang questionnaire",
+        "complete_body": "Narekord ang imo pilian sa aktibo nga sesyon lamang. Wala ginatipigan sang prototype ang datos sa database sang pagtuon ukon ginapasa ini para usisaon.",
+        "declined_title": "Ginkuha ang datos sang sesyon",
+        "declined_body": "Wala ka nagauyon sa paggamit sang datos pagkatapos sang pagpaathag. Ginkuha na ang aktibo nga mga sabat kag recording.",
+        "reset": "Magsugod sang bag-o nga sesyon",
+        "manual_birthplace_notice": "Naga hulat ini sang panghimatuud sang manug-usisa; wala ini ginpanghimatuudan sang PSGC.",
+        "birthplace_other": "Isulat ang lugar nga natawhan para panghimatuudan",
+    },
+}
+CONSENT_TEXT = {
+    "English": {
+        "purpose_title": "Purpose",
+        "purpose": "This study examines speech and responses during short cognitive tasks. Some specific study details are withheld until the debriefing so they do not influence responses.",
+        "participation_title": "What participation involves",
+        "participation": "You will answer screening questions, complete three spoken cognitive tasks in order, upload a voice recording after each task, and rate your fatigue immediately after each recording. These activities may cause temporary mental effort or tiredness.",
+        "privacy_title": "Confidentiality and data handling",
+        "privacy": "Your name is not requested. A confidential participant code is generated automatically. Voice recordings can identify you. Uploaded recordings and answers are sent to the application server for processing during this session. This prototype has no research database connected and does not submit data for analysis. Approved security, access, storage, and retention arrangements must be in place before recruitment.",
+        "withdraw_title": "Voluntary participation and withdrawal",
+        "withdraw": "Participation is voluntary. You may withdraw at any time without penalty by using the withdrawal control. It clears the active questionnaire answers and recordings from this app session. Ask the research team about removal of any data already submitted under the approved study protocol.",
+    },
+    "Hiligaynon": {
+        "purpose_title": "Katuyuan",
+        "purpose": "Ginatuon sang sini nga pagtuon ang paghambal kag mga sabat samtang nagahimo sang malip-ot nga mga buluhaton sa panghunahuna. Ang pila ka detalye ipahibalo pagkatapos sang mga buluhaton agod indi ini makaapekto sa imo mga sabat.",
+        "participation_title": "Ano ang pag-apil",
+        "participation": "Masabat ka sang mga pamangkot sa screening, maghimo sang tatlo ka buluhaton sa panghunahuna sunod-sunod, mag-upload sang recording pagkatapos sang kada buluhaton, kag magmarka sang kakapoy pagkatapos gid sang kada recording. Mahimo ini magdulot sang temporaryo nga pagpanikasog sang hunahuna ukon kakapoy.",
+        "privacy_title": "Kompidensyalidad kag pagdumala sang datos",
+        "privacy": "Wala ginapangayo ang imo ngalan. Awtomatiko nga ginahimo ang kompidensyal nga kodigo sang partisipante. Mahimo makakilala sang tawo paagi sa iya tingog. Ginapadala sa application server ang mga recording kag sabat agod maproseso sa aktibo nga sesyon. Wala konektado nga database sang pagtuon sa sini nga prototype kag wala ginapasa ang datos para sa pag-usisa. Dapat may gin-aprubahan nga seguridad, access, pagtipig, kag retention antes mag-recruit.",
+        "withdraw_title": "Boluntaryo nga pag-apil kag pagbiya",
+        "withdraw": "Boluntaryo ang pag-apil. Mahimo ka magbiya bisan san-o nga wala sing silot paagi sa withdrawal button. Kuhaon sini ang aktibo nga mga sabat kag recording sa sesyon sang app. Pamangkuta ang research team kon paano kuhaon ang datos nga naipasa na suno sa gin-aprubahan nga protocol.",
+    },
 }
 TASK_PROMPTS = {
     "Easy": {
-        "hiligaynon": "May 8 ka nga mangga. Ginhatagan mo ang imo abyan sang 3. Pila ka mangga ang nabilin sa imo? Ipaathag sing matunog ang kada tikang sang imo pagsolbar.",
-        "english": "You have 8 mangoes and give 3 to your friend. How many mangoes do you have left? Explain each step of your reasoning aloud.",
+        "hiligaynon": "Basaha sing matunog: 'Sa kaagahon, nagkadto si Lina sa merkado agod magbakal sang prutas para sa iya pamilya. Pag-abot sa balay, iya ginbahin ang prutas sa ila tanan.' Isaysay sa imo kaugalingon nga mga pulong kon ano ang ginhimo ni Lina kag ngaa.",
+        "english": "Read aloud: 'In the morning, Lina went to the market to buy fruit for her family. When she arrived home, she shared the fruit with everyone.' Retell in your own words what Lina did and why.",
     },
     "Moderate": {
-        "hiligaynon": "May 4 ka kaumpok sang lapis, kag may 6 ka lapis sa kada kaumpok. Pila tanan ka lapis? Ipaathag sing matunog kon paano mo nakuha ang sabat.",
-        "english": "You have 4 bundles of pencils with 6 pencils in each bundle. How many pencils are there altogether? Explain aloud how you worked it out.",
+        "hiligaynon": "May 4 ka kaumpok sang lapis, kag may 6 ka lapis sa kada kaumpok. Ginhatagan mo ang 5 mo ka estudyante sing pareho nga kadamuon. Pila ka lapis ang mabaton sang kada estudyante? Ipaathag sing matunog ang kada tikang sang imo pagsolbar.",
+        "english": "There are 4 bundles of pencils with 6 pencils in each bundle. You share them equally among 5 students. How many pencils does each student get? Explain each step of your reasoning aloud.",
     },
     "Intensive": {
-        "hiligaynon": "May 48 ka lapis nga ginpanagtag sing patas sa 6 ka estudyante. Dayon, ang kada estudyante nakabaton pa sang 2 ka dugang nga lapis. Pila tanan ka lapis ang ginpanagtag? Ipaathag sing matunog ang kada tikang sang imo pagsolbar.",
-        "english": "48 pencils are shared equally among 6 students. Then each student receives 2 more pencils. How many pencils are distributed altogether? Explain each step of your reasoning aloud.",
+        "hiligaynon": "Mag-ihap paatras halin sa 30 tubtob sa 1. Dayon, sabta ini: May 48 ka lapis nga ginpanagtag sing patas sa 6 ka estudyante. Ang kada estudyante naghatag liwat sang 2 ka lapis sa iya abyan. Pila ka lapis ang nabilin sa kada estudyante? Ipaathag sing matunog ang kada tikang sang imo panghunahuna.",
+        "english": "Count backward from 30 to 1. Then solve: 48 pencils are shared equally among 6 students. Each student then gives 2 pencils to a friend. How many pencils does each student have left? Explain each step of your reasoning aloud.",
     },
 }
 
 
-def next_step():
-    step = st.session_state.current_step
-    if step == 1 and not st.session_state.consent_accepted:
-        return
-    if step == 3 and st.session_state.recorded_audio_bytes is None:
-        return
-    if step == 4 and st.session_state.samn_perelli_rating is None:
-        return
-    st.session_state.current_step = min(step + 1, 5)
+def persist_language_choice():
+    key = f"language_selector_{st.session_state.session_id}"
+    st.session_state.language = st.session_state[key]
+    st.session_state.screening_errors = []
+
+
+def continue_to_consent():
+    st.session_state.current_step = 1
+
+
+def accept_consent():
+    if st.session_state.consent_accepted:
+        st.session_state.current_step = 2
+
+
+def persist_fatigue_rating():
+    task_level = TASK_LEVELS[st.session_state.task_index]
+    key = f"fatigue_rating_{st.session_state.session_id}_{task_level}"
+    rating = st.session_state[key]
+    if rating is not None:
+        ratings = dict(st.session_state.task_ratings)
+        ratings[task_level] = rating
+        st.session_state.task_ratings = ratings
+        st.session_state.samn_perelli_rating = rating
+
+
+def persist_birthplace_province():
+    key = f"birthplace_province_{st.session_state.session_id}"
+    st.session_state.birthplace_province_code = st.session_state[key]
+    st.session_state.birthplace = ""
+    locality_key = f"birthplace_locality_{st.session_state.session_id}_{st.session_state.birthplace_province_code}"
+    st.session_state[locality_key] = None
+
+
+def persist_birthplace_locality():
+    suffix = "philippines" if st.session_state.birthplace_scope == "philippines" else st.session_state.birthplace_province_code
+    locality_key = f"birthplace_locality_{st.session_state.session_id}_{suffix}"
+    st.session_state.birthplace = st.session_state.get(locality_key, "")
+
+
+def persist_birthplace_scope():
+    key = f"birthplace_scope_{st.session_state.session_id}"
+    st.session_state.birthplace_scope = st.session_state[key]
+    st.session_state.birthplace = ""
+    st.session_state.birthplace_needs_review = False
+
+
+def persist_manual_birthplace():
+    key = f"birthplace_manual_{st.session_state.session_id}"
+    st.session_state.birthplace_manual_text = st.session_state[key].strip()
+    st.session_state.birthplace = st.session_state.birthplace_manual_text
+    st.session_state.birthplace_needs_review = bool(st.session_state.birthplace)
+
+
+def persist_native_language():
+    key = f"native_language_{st.session_state.session_id}"
+    st.session_state.native_language = st.session_state[key]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_province_localities(province_code):
+    if province_code not in WESTERN_VISAYAS_PROVINCES:
+        raise ValueError("Unsupported province code")
+
+    url = f"https://psgc.gitlab.io/api/provinces/{province_code}/cities-municipalities/"
+    with urlopen(url, timeout=8) as response:
+        places = json.loads(response.read().decode("utf-8"))
+
+    if not isinstance(places, list) or not places:
+        raise ValueError("The official locality list was empty or invalid")
+
+    province_name = WESTERN_VISAYAS_PROVINCES[province_code]
+    return _format_locality_options(places, {province_code: province_name})
+
+
+def _format_locality_options(places, province_names):
+    options = []
+    for place in places:
+        name = place.get("name", "")
+        if place.get("isCity") and name.startswith("City of "):
+            name = f"{name.removeprefix('City of ')} City"
+        elif place.get("isCity") and not name.endswith("City"):
+            name = f"{name} City"
+        province_name = province_names.get(place.get("provinceCode"), "Philippines")
+        options.append(f"{name}, {province_name}")
+    return sorted(set(options))
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_all_ph_localities():
+    with urlopen("https://psgc.gitlab.io/api/cities-municipalities/", timeout=12) as response:
+        places = json.loads(response.read().decode("utf-8"))
+    with urlopen("https://psgc.gitlab.io/api/provinces/", timeout=12) as response:
+        provinces = json.loads(response.read().decode("utf-8"))
+    if not isinstance(places, list) or not places or not isinstance(provinces, list):
+        raise ValueError("The official Philippine locality list was invalid")
+    province_names = {province["code"]: province["name"] for province in provinces}
+    return _format_locality_options(places, province_names)
+
+
+def update_recording():
+    task_level = TASK_LEVELS[st.session_state.task_index]
+    uploader_key = f"participant_audio_{st.session_state.session_id}_{task_level}"
+    uploaded = st.session_state.get(uploader_key)
+    audio_bytes = uploaded.getvalue() if uploaded else None
+    st.session_state.recorded_audio_bytes = audio_bytes
+    recordings = dict(st.session_state.task_recordings)
+    ratings = dict(st.session_state.task_ratings)
+    if audio_bytes:
+        recordings[task_level] = audio_bytes
+    else:
+        recordings.pop(task_level, None)
+        ratings.pop(task_level, None)
+        st.session_state.task_ratings = ratings
+    st.session_state.task_recordings = recordings
+
+
+def submit_screening():
+    language = st.session_state.language
+    messages = SCREENING_TEXT[language]
+    errors = []
+    birthplace = st.session_state.birthplace.strip()
+
+    if not birthplace:
+        errors.append(messages["required_manual_birthplace"] if st.session_state.birthplace_scope == "outside_ph" else messages["required_birthplace"])
+    elif st.session_state.birthplace_scope == "western_visayas":
+        try:
+            allowed_birthplaces = load_province_localities(st.session_state.birthplace_province_code)
+        except (OSError, URLError, ValueError, json.JSONDecodeError):
+            allowed_birthplaces = []
+            errors.append(messages["birthplace_unavailable"])
+        if allowed_birthplaces and birthplace not in allowed_birthplaces:
+            errors.append(messages["invalid_birthplace"])
+    elif st.session_state.birthplace_scope == "philippines":
+        try:
+            allowed_birthplaces = load_all_ph_localities()
+        except (OSError, URLError, ValueError, json.JSONDecodeError):
+            allowed_birthplaces = []
+            errors.append(messages["birthplace_unavailable"])
+        if allowed_birthplaces and birthplace not in allowed_birthplaces:
+            errors.append(messages["invalid_birthplace"])
+    else:
+        valid_manual_location = (
+            2 <= len(birthplace) <= 120
+            and any(character.isalpha() for character in birthplace)
+            and all(character.isalpha() or character in " .,'’()/-" for character in birthplace)
+        )
+        if not valid_manual_location:
+            errors.append(messages["invalid_birthplace"])
+        else:
+            st.session_state.birthplace_needs_review = True
+
+    native_language = st.session_state.native_language
+    if native_language is None:
+        errors.append(messages["required_native"])
+    elif native_language != "Hiligaynon":
+        errors.append(messages["ineligible"])
+
+    st.session_state.screening_errors = errors
+    if not errors:
+        st.session_state.current_task_level = TASK_LEVELS[0]
+        st.session_state.task_index = 0
+        st.session_state.recorded_audio_bytes = None
+        st.session_state.task_recordings = {}
+        st.session_state.task_ratings = {}
+        st.session_state.current_step = 3
 
 
 def previous_step():
-    st.session_state.current_step = max(st.session_state.current_step - 1, 1)
+    step = st.session_state.current_step
+    if step == 1:
+        st.session_state.current_step = 0
+    elif step == 2:
+        st.session_state.current_step = 1
+    elif step == 3 and st.session_state.task_index > 0:
+        st.session_state.task_index -= 1
+        st.session_state.current_task_level = TASK_LEVELS[st.session_state.task_index]
+        st.session_state.recorded_audio_bytes = st.session_state.task_recordings.get(st.session_state.current_task_level)
+    elif step == 3:
+        st.session_state.current_step = 2
+    elif step == 4:
+        st.session_state.current_step = 3
 
 
-def render_consent_step():
-    st.header("Step 1 · Informed Consent")
-    st.markdown(
-        """
-        <div class="metric-card">
-            <h3>Purpose / Katuyuan</h3>
-            <p>This study examines speech and responses during short cognitive tasks. Some specific study details are withheld until the debriefing so they do not influence responses.</p>
-            <p>Ginatuon sang sini nga pagtuon ang paghambal kag mga sabat samtang nagahimo sang malip-ot nga mga buluhaton sa panghunahuna. Ang pila ka detalye sang pagtuon ipahibalo pagkatapos sang buluhaton agod indi ini makaapekto sa imo mga sabat.</p>
-            <h3>What participation involves / Ano ang pag-apil</h3>
-            <p>You will answer screening questions, complete a spoken cognitive task, provide a fatigue rating, and submit a voice recording. Speaking and the task may cause temporary mental effort or tiredness.</p>
-            <p>Masabat ka sang mga pamangkot para sa screening, maghimo sang buluhaton sa panghunahuna samtang nagahambal, maghatag sang marka sang kakapoy, kag magrekord sang imo tingog. Mahimo ini magdulot sang temporaryo nga pagpanikasog sang hunahuna ukon kakapoy.</p>
-            <h3>Confidentiality / Pagtipig sang kompidensyalidad</h3>
-            <p>A voice recording can identify you. In this prototype, uploaded audio and responses are sent to the application server for processing during this session but are not saved to a research database. Before recruitment, the research team must implement and explain the approved access, security, storage, and retention arrangements.</p>
-            <p>Mahimo makakilala sang tawo paagi sa iya tingog. Sa sini nga prototype, ginapadala sa application server ang audio kag mga sabat para maproseso samtang aktibo ang sesyon, pero wala ini ginatipigan sa database sang pagtuon. Antes mag-recruit sang mga partisipante, dapat ipatuman kag ipahibalo sang research team ang gin-aprubahan nga mga paagi sa pag-access, seguridad, pagtipig, kag pag-retain sang datos.</p>
-            <h3>Voluntary participation and withdrawal / Boluntaryo nga pag-apil kag pag-untat</h3>
-            <p>Taking part is voluntary. You may skip a question, stop, or withdraw at any time without penalty or loss of benefits. Ask the research team how to request removal of data already submitted under the approved protocol.</p>
-            <p>Boluntaryo ang pag-apil. Mahimo mo laktawan ang pamangkot, mag-untat, ukon magbiya sa pagtuon bisan san-o nga wala sing silot ukon madula nga benepisyo. Pamangkuta ang research team kon paano ipapangayo ang pagtangtang sang datos nga naipasa na suno sa gin-aprubahan nga protocol.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+def persist_consent():
+    key = f"consent_check_{st.session_state.session_id}"
+    st.session_state.consent_accepted = st.session_state[key]
+
+
+def open_rating_step():
+    task_level = TASK_LEVELS[st.session_state.task_index]
+    if st.session_state.task_recordings.get(task_level):
+        st.session_state.current_step = 4
+
+
+def save_rating_and_continue():
+    task_level = TASK_LEVELS[st.session_state.task_index]
+    if task_level not in st.session_state.task_ratings:
+        return
+    if st.session_state.task_index < len(TASK_LEVELS) - 1:
+        st.session_state.task_index += 1
+        st.session_state.current_task_level = TASK_LEVELS[st.session_state.task_index]
+        st.session_state.recorded_audio_bytes = st.session_state.task_recordings.get(st.session_state.current_task_level)
+        st.session_state.current_step = 3
+    else:
+        st.session_state.current_step = 5
+
+
+def finish_debrief():
+    if st.session_state.post_debrief_choice == "decline":
+        clear_participant_data(8)
+    elif st.session_state.post_debrief_choice == "agree":
+        st.session_state.current_step = 6
+
+
+def clear_participant_data(destination_step):
+    st.session_state.task_recordings = {}
+    st.session_state.task_ratings = {}
+    st.session_state.recorded_audio_bytes = None
+    st.session_state.inference_results = {}
+    st.session_state.respondent_id = f"WVSU-{uuid.uuid4().hex}"
+    st.session_state.birthplace = ""
+    st.session_state.birthplace_manual_text = ""
+    st.session_state.birthplace_scope = "western_visayas"
+    st.session_state.birthplace_province_code = "063000000"
+    st.session_state.birthplace_needs_review = False
+    st.session_state.native_language = None
+    st.session_state.hiligaynon_frequency_score = 3
+    st.session_state.samn_perelli_rating = None
+    st.session_state.current_task_level = TASK_LEVELS[0]
+    st.session_state.task_index = 0
+    st.session_state.screening_errors = []
+    st.session_state.consent_accepted = False
+    st.session_state.post_debrief_choice = None
+    st.session_state.post_debrief_consent = False
+    st.session_state.session_id = str(uuid.uuid4())
+    st.session_state.current_step = destination_step
+
+
+def withdraw_session():
+    clear_participant_data(7)
+
+
+def persist_post_debrief_choice():
+    st.session_state.post_debrief_choice = st.session_state[f"post_debrief_choice_{st.session_state.session_id}"]
+
+
+def render_progress(text):
+    step = st.session_state.current_step
+    labels = text["progress"]
+    progress_value = {1: 0.2, 2: 0.4, 3: 0.6, 4: 0.8, 5: 1.0, 6: 1.0}.get(step)
+    if progress_value is not None:
+        st.progress(progress_value)
+        st.caption("  ›  ".join(labels[1:]))
+    if step in (1, 2, 3, 4, 5):
+        with st.expander(text["withdraw"], expanded=False):
+            st.warning(text["withdraw_body"])
+            st.button(
+                text["withdraw"],
+                key=f"withdraw_{st.session_state.session_id}",
+                on_click=withdraw_session,
+                type="secondary",
+            )
+
+
+def render_language_step(text):
+    st.header(text["app_title"])
+    st.subheader(text["language_title"])
+    st.write(text["language_intro"])
+    language_key = f"language_selector_{st.session_state.session_id}"
+    st.radio(
+        text["language_label"],
+        options=LANGUAGES,
+        horizontal=True,
+        key=language_key,
+        index=LANGUAGES.index(st.session_state.language),
+        on_change=persist_language_choice,
     )
+    st.button(text["language_continue"], type="primary", on_click=continue_to_consent)
 
-    st.caption("The Hiligaynon translation is a draft. Have a fluent speaker and the approving ethics committee review it; define server security and data-retention arrangements before recruitment.")
+
+def render_consent_step(text):
+    consent_text = CONSENT_TEXT[st.session_state.language]
+    st.header(text["consent_title"])
+    render_progress(text)
+    st.subheader(consent_text["purpose_title"])
+    st.write(consent_text["purpose"])
+    st.subheader(consent_text["participation_title"])
+    st.write(consent_text["participation"])
+    st.subheader(consent_text["privacy_title"])
+    st.write(consent_text["privacy"])
+    st.subheader(consent_text["withdraw_title"])
+    st.write(consent_text["withdraw"])
+    st.caption(text["consent_notice"])
     st.checkbox(
-        "Nabasa ko kag naintindihan ang impormasyon; boluntaryo ako nga nagauyon mag-apil. / I have read and understood this information, and I voluntarily agree to participate.",
-        key="consent_accepted",
+        text["consent_ack"],
+        key=f"consent_check_{st.session_state.session_id}",
+        value=st.session_state.consent_accepted,
+        on_change=persist_consent,
     )
-
     st.button(
-        "Next · Sunod",
+        text["consent_next"],
         type="primary",
-        use_container_width=True,
         disabled=not st.session_state.consent_accepted,
-        on_click=next_step,
+        on_click=accept_consent,
     )
 
 
 def render_screening_step():
-    st.header("Step 2 · Screening")
-    st.write("Please provide your demographics and language information before the speech task begins.")
+    language = st.session_state.language
+    text = SCREENING_TEXT[language]
+    st.header(text["step"])
+    st.write(text["intro"])
+    render_progress(FLOW_TEXT[language])
+    session_id = st.session_state.session_id
+    language_key = f"language_selector_{session_id}"
+    st.radio(
+        text["language"],
+        options=LANGUAGES,
+        format_func=lambda value: {"Hiligaynon": "Hiligaynon", "English": "English"}[value],
+        index=LANGUAGES.index(st.session_state.language),
+        horizontal=True,
+        key=language_key,
+        on_change=persist_language_choice,
+    )
+    st.caption(f"{text['respondent_id']}: {st.session_state.respondent_id}")
+    st.markdown(f"**{text['birthplace']}**")
+    scope_options = ["western_visayas", "philippines", "outside_ph"]
+    scope_key = f"birthplace_scope_{session_id}"
+    st.selectbox(
+        text["birthplace_scope"],
+        options=scope_options,
+        format_func=lambda scope: text["birthplace_scopes"][scope],
+        index=scope_options.index(st.session_state.birthplace_scope),
+        key=scope_key,
+        on_change=persist_birthplace_scope,
+    )
+    birthplace_options = []
+    birthplace_available = True
+    if st.session_state.birthplace_scope == "western_visayas":
+        province_codes = list(WESTERN_VISAYAS_PROVINCES)
+        province_key = f"birthplace_province_{session_id}"
+        province_code = st.selectbox(
+            text["birthplace_province"],
+            options=province_codes,
+            format_func=lambda code: WESTERN_VISAYAS_PROVINCES[code],
+            index=province_codes.index(st.session_state.birthplace_province_code),
+            key=province_key,
+            on_change=persist_birthplace_province,
+        )
+        st.session_state.birthplace_province_code = province_code
+        try:
+            birthplace_options = load_province_localities(province_code)
+        except (OSError, URLError, ValueError, json.JSONDecodeError):
+            birthplace_available = False
+    elif st.session_state.birthplace_scope == "philippines":
+        try:
+            birthplace_options = load_all_ph_localities()
+        except (OSError, URLError, ValueError, json.JSONDecodeError):
+            birthplace_available = False
 
-    with st.form("screening_form"):
+    if st.session_state.birthplace_scope != "outside_ph":
+        if not birthplace_available:
+            st.error(text["birthplace_unavailable"])
+        locality_key = f"birthplace_locality_{session_id}_{st.session_state.birthplace_province_code}"
+        if st.session_state.birthplace_scope == "philippines":
+            locality_key = f"birthplace_locality_{session_id}_philippines"
+        selected_birthplace = st.session_state.birthplace if st.session_state.birthplace in birthplace_options else None
+        st.selectbox(
+            text["birthplace_locality"],
+            options=birthplace_options,
+            index=birthplace_options.index(selected_birthplace) if selected_birthplace else None,
+            key=locality_key,
+            on_change=persist_birthplace_locality,
+            disabled=not birthplace_options,
+        )
+    else:
+        manual_key = f"birthplace_manual_{session_id}"
         st.text_input(
-            "Respondent ID",
-            placeholder="WVSU_CS_001",
-            key="respondent_id",
+            text["birthplace_manual"],
+            value=st.session_state.birthplace_manual_text,
+            max_chars=120,
+            key=manual_key,
+            on_change=persist_manual_birthplace,
         )
-        st.text_input("Birthplace", placeholder="Iloilo City", key="birthplace")
-        st.text_input("Native Language", placeholder="Hiligaynon", key="native_language")
-        st.slider(
-            "How often do you speak Hiligaynon daily?",
-            min_value=1,
-            max_value=5,
-            value=3,
-            key="hiligaynon_frequency_score",
-        )
-        st.radio(
-            "Preferred language for instructions",
-            options=["Hiligaynon", "English"],
-            horizontal=True,
-            key="language",
-        )
+        if st.session_state.birthplace_manual_text:
+            st.info(FLOW_TEXT[language]["manual_birthplace_notice"])
 
-        previous_col, next_col = st.columns(2)
-        with previous_col:
-            st.form_submit_button("Previous · Nagligad", on_click=previous_step, use_container_width=True)
-        with next_col:
-            st.form_submit_button("Next · Sunod", type="primary", on_click=next_step, use_container_width=True)
+    native_key = f"native_language_{session_id}"
+    st.selectbox(
+        text["native_language"],
+        options=NATIVE_LANGUAGES,
+        index=NATIVE_LANGUAGES.index(st.session_state.native_language) if st.session_state.native_language else None,
+        format_func=lambda value: text["native_names"][value],
+        key=native_key,
+        on_change=persist_native_language,
+    )
+    st.markdown(f"**{text['frequency_anchor']}**")
+    frequency_columns = st.columns(5)
+    for index, column in enumerate(frequency_columns):
+        with column:
+            st.markdown(f"**● {index + 1}**")
+            st.caption(FLOW_TEXT[language]["frequency_values"][index])
+    frequency_key = f"frequency_score_{session_id}"
+    st.slider(
+        text["frequency"],
+        min_value=1,
+        max_value=5,
+        step=1,
+        value=st.session_state.hiligaynon_frequency_score,
+        key=frequency_key,
+        on_change=lambda: st.session_state.update(hiligaynon_frequency_score=st.session_state[frequency_key]),
+    )
+    frequency = st.session_state.hiligaynon_frequency_score
+    st.caption(text["frequency_selected"].format(value=frequency, anchor=FLOW_TEXT[language]["frequency_values"][frequency - 1]))
+
+    for error in st.session_state.screening_errors:
+        st.error(error)
+
+    previous_col, next_col = st.columns(2)
+    with previous_col:
+        st.button(text["previous"], on_click=previous_step, use_container_width=True)
+    with next_col:
+        st.button(
+            text["next"],
+            type="primary",
+            on_click=submit_screening,
+            use_container_width=True,
+            disabled=not birthplace_available,
+        )
 
 
 def render_task_step():
-    st.header("Step 3 · Task Wizard")
-    task_level = st.selectbox(
-        "Select task level",
-        TASK_LEVELS,
-        index=TASK_LEVELS.index(st.session_state.current_task_level),
-        key="current_task_level",
-    )
+    language = st.session_state.language
+    text = UI_TEXT[language]
+    screening = SCREENING_TEXT[language]
+    flow = FLOW_TEXT[language]
+    task_level = TASK_LEVELS[st.session_state.task_index]
+    st.header(text["step_task"])
+    render_progress(flow)
+    st.caption(flow["task_order"].format(number=st.session_state.task_index + 1, task=text["task_names"][task_level]))
     prompt = TASK_PROMPTS[task_level]
-    st.info("Basaha ang pamangkot kag sabta ini paagi sa paghambal. Ipaathag ang imo panghunahuna sing matunog. / Read the prompt and answer aloud, explaining your reasoning.")
-    st.markdown(f"**Hiligaynon prompt:** {prompt['hiligaynon']}")
-    st.caption(f"English translation: {prompt['english']}")
-    st.caption("Prompt wording and difficulty progression are drafts; confirm them against the approved thesis protocol before participant recruitment.")
+    st.info(text["task_instructions"])
+    st.markdown(f"**{text['prompt_label']}:** {prompt[language.lower()]}")
+    st.caption(text["draft_notice"])
 
+    audio_key = f"participant_audio_{st.session_state.session_id}_{task_level}"
     uploaded = st.file_uploader(
-        "Record or upload speech audio",
+        flow["upload_title"],
         type=["wav", "mp3", "m4a", "ogg"],
-        help="Accepted formats: WAV, MP3, M4A, and OGG.",
+        help=flow["upload_help"],
+        key=audio_key,
+        on_change=update_recording,
     )
 
     if uploaded is not None:
-        st.session_state.recorded_audio_bytes = uploaded.read()
-        st.audio(st.session_state.recorded_audio_bytes)
-        st.success("Audio captured successfully. Proceed to the fatigue rating step.")
+        st.audio(uploaded.getvalue())
+        if not st.session_state.recorded_audio_bytes:
+            st.error(text["audio_error"])
+    if st.session_state.recorded_audio_bytes:
+        st.success(flow["task_complete"])
+    else:
+        st.info(text["audio_required"])
 
     col1, col2 = st.columns([1, 1])
     with col1:
-        st.button("Previous · Nagligad", use_container_width=True, on_click=previous_step)
+        st.button(screening["previous"], use_container_width=True, on_click=previous_step)
     with col2:
         st.button(
-            "Next · Sunod: fatigue rating",
+            flow["next_rating"],
             type="primary",
             use_container_width=True,
-            disabled=st.session_state.recorded_audio_bytes is None,
-            on_click=next_step,
+            disabled=not st.session_state.task_recordings.get(task_level),
+            on_click=open_rating_step,
         )
 
 
 def render_rating_step():
-    st.header("Step 4 · Samn-Perelli Fatigue Rating")
-    st.write("Rate your current fatigue level immediately after the task.")
+    language = st.session_state.language
+    text = UI_TEXT[language]
+    screening = SCREENING_TEXT[language]
+    flow = FLOW_TEXT[language]
+    task_level = TASK_LEVELS[st.session_state.task_index]
+    st.header(text["step_rating"])
+    render_progress(flow)
+    st.caption(flow["rating_order"].format(number=st.session_state.task_index + 1))
+    st.write(text["rating_intro"])
 
+    rating_key = f"fatigue_rating_{st.session_state.session_id}_{task_level}"
+    stored_rating = st.session_state.task_ratings.get(task_level)
     rating = st.radio(
-        "Pilia ang deskripsyon nga pinakabagay sa imo kakapoy / Choose the description that best matches your fatigue level",
+        text["rating_prompt"],
         options=SAMN_SCALE,
-        format_func=lambda value: f"{value} · {SAMN_LABELS[value]}",
+        format_func=lambda value: f"{value} · {SAMN_LABELS[language][value - 1]}",
         horizontal=False,
-        index=None if st.session_state.samn_perelli_rating is None else SAMN_SCALE.index(st.session_state.samn_perelli_rating),
-        key="samn_perelli_rating",
+        index=None if stored_rating is None else SAMN_SCALE.index(stored_rating),
+        key=rating_key,
+        on_change=persist_fatigue_rating,
     )
 
     col1, col2 = st.columns([1, 1])
     with col1:
-        st.button("Previous · Nagligad", use_container_width=True, on_click=previous_step)
+        st.button(screening["previous"], use_container_width=True, on_click=previous_step)
     with col2:
         st.button(
-            "Next · Sunod: debriefing",
+            flow["finish_tasks"] if st.session_state.task_index == len(TASK_LEVELS) - 1 else flow["next_task"],
             type="primary",
             use_container_width=True,
             disabled=rating is None,
-            on_click=next_step,
+            on_click=save_rating_and_continue,
         )
 
 
 def render_debriefing_step():
-    st.header("Step 5 · Debriefing")
-
-    st.success("Thank you for completing the task. / Salamat sa paghuman sang buluhaton.")
-    st.markdown(
-        """
-        <div class="wizard-shell">
-            <p><strong>Disclosure / Pagpahayag:</strong> The true target of this study is cognitive fatigue as reflected in speech. The task prompts were used to elicit speech while varying cognitive effort; this specific focus was not fully explained before the task to reduce response bias.</p>
-            <p>Ang matuod nga ginatuon sang sini nga pagtuon amo ang kakapoy sang panghunahuna nga makita sa paghambal. Gin-gamit ang mga buluhaton agod makakuha sang mga halimbawa sang paghambal samtang nagabag-o ang panikasog sang panghunahuna; wala ginpaathag sing bug-os ang sini nga tuyo antes sang buluhaton agod malikawan ang pagbag-o sang sabat.</p>
-            <p>You may now ask questions or withdraw. Your recording and responses were sent to the application server for processing in this session, but this prototype does not save them to a research database or submit them for analysis.</p>
-            <p>Mahimo ka na mamangkot ukon magbiya sa pagtuon. Ginpadala sa application server ang imo recording kag mga sabat agod maproseso sa sini nga sesyon, pero wala ini ginatipigan sang prototype sa database sang pagtuon ukon ginapasa para sa pag-usisa.</p>
-            <p><strong>Respondent ID:</strong> {respondent_id}</p>
-            <p><strong>Task Level / Antas sang buluhaton:</strong> {task_level}</p>
-            <p><strong>Samn-Perelli Rating / Marka sang kakapoy:</strong> {rating}</p>
-        </div>
-        """.format(
-            respondent_id=st.session_state.respondent_id or "Not provided",
-            task_level=st.session_state.current_task_level,
-            rating=(
-                f"{st.session_state.samn_perelli_rating} · "
-                f"{SAMN_LABELS[st.session_state.samn_perelli_rating]}"
-                if st.session_state.samn_perelli_rating is not None
-                else "Not provided"
-            ),
-        ),
-        unsafe_allow_html=True,
+    language = st.session_state.language
+    text = UI_TEXT[language]
+    flow = FLOW_TEXT[language]
+    st.header(text["step_debrief"])
+    render_progress(flow)
+    st.success(text["thanks"])
+    st.subheader(text["disclosure_title"])
+    st.write(text["disclosure"])
+    st.write(text["withdrawal"])
+    st.caption(f"{text['participant_code']}: {st.session_state.respondent_id}")
+    st.subheader(text["task_label"])
+    for task_level in TASK_LEVELS:
+        task_name = text["task_names"][task_level]
+        recording = flow["recording_present"] if st.session_state.task_recordings.get(task_level) else flow["recording_missing"]
+        rating = st.session_state.task_ratings.get(task_level)
+        rating_label = f"{rating} · {SAMN_LABELS[language][rating - 1]}" if rating is not None else text["no_rating"]
+        st.write(f"{task_name} · {text['recording_label']}: {recording} · {text['rating_label']}: {rating_label}")
+    if st.session_state.birthplace_needs_review:
+        st.warning(flow["manual_birthplace_notice"])
+    st.subheader(flow["post_consent_prompt"])
+    choice_key = f"post_debrief_choice_{st.session_state.session_id}"
+    choice = st.radio(
+        text["post_consent"],
+        options=["agree", "decline"],
+        format_func=lambda value: flow["post_consent_options"][value],
+        index=None if st.session_state.post_debrief_choice is None else ["agree", "decline"].index(st.session_state.post_debrief_choice),
+        key=choice_key,
+        on_change=persist_post_debrief_choice,
+        label_visibility="collapsed",
     )
-
-    st.checkbox(
-        "Pagkatapos mahibaluan ang matuod nga katuyuan, nagauyon ako nga gamiton ang akon datos para sa pagtuon. / After learning the true purpose, I agree that my data may be used for the study.",
-        key="post_debrief_consent",
+    if choice is not None:
+        st.info(text["post_consent_yes"] if choice == "agree" else flow["post_consent_options"]["decline"] + ". " + text["post_consent_no"])
+    st.button(
+        flow["finish_debrief"],
+        type="primary",
+        on_click=finish_debrief,
+        disabled=st.session_state.post_debrief_choice is None,
     )
-    if st.session_state.post_debrief_consent:
-        st.success("Post-debriefing confirmation noted in this active session only; it is not saved to a database. / Nakumpirmar ini sa aktibo nga sesyon lamang; wala ini ginatipigan sa database.")
-    else:
-        st.info("Your post-debriefing confirmation is not given. / Wala mo pa ginkumpirmar ang paggamit sang datos pagkatapos sang debriefing.")
-
-    st.button("Reset session", type="secondary", on_click=reset_session)
 
 
 def reset_session():
-    for key, value in DEFAULTS.items():
-        st.session_state[key] = str(uuid.uuid4()) if key == "session_id" else value
+    clear_participant_data(0)
+    st.session_state.birthplace_scope = "western_visayas"
+    st.session_state.birthplace_province_code = "063000000"
 
 
-st.title("Participant Data Collection")
-st.caption("Study workflow for recording speech, rating fatigue, and completing the research task.")
-
-if st.session_state.current_step == 1:
-    render_consent_step()
+language_text = FLOW_TEXT[st.session_state.language]
+if st.session_state.current_step == 0:
+    render_language_step(language_text)
+elif st.session_state.current_step == 1:
+    st.title(language_text["app_title"])
+    render_consent_step(language_text)
 elif st.session_state.current_step == 2:
+    st.title(language_text["app_title"])
     render_screening_step()
 elif st.session_state.current_step == 3:
+    st.title(language_text["app_title"])
     render_task_step()
 elif st.session_state.current_step == 4:
+    st.title(language_text["app_title"])
     render_rating_step()
 elif st.session_state.current_step == 5:
+    st.title(language_text["app_title"])
     render_debriefing_step()
+elif st.session_state.current_step == 6:
+    st.title(language_text["complete_title"])
+    st.success(language_text["complete_body"])
+    st.button(language_text["reset"], type="primary", on_click=reset_session)
+elif st.session_state.current_step == 7:
+    st.title(language_text["withdraw_title"])
+    st.success(language_text["withdraw_body"])
+    st.button(language_text["reset"], type="primary", on_click=reset_session)
+elif st.session_state.current_step == 8:
+    st.title(language_text["declined_title"])
+    st.success(language_text["declined_body"])
+    st.button(language_text["reset"], type="primary", on_click=reset_session)

@@ -9,9 +9,12 @@ st.markdown(
     """
     <style>
         .block-container { padding-top: 2rem; }
+        h1, h2, h3 { color: #1D4ED8; }
+        h1 { border-left: 5px solid #2563EB; padding-left: 0.75rem; }
         .card-panel {
             background: #FFFFFF;
-            border: 1px solid rgba(148, 163, 184, 0.25);
+            border: 1px solid rgba(37, 99, 235, 0.18);
+            border-top: 4px solid #2563EB;
             border-radius: 18px;
             padding: 1.25rem;
             box-shadow: 0 12px 24px rgba(15, 23, 42, 0.04);
@@ -28,6 +31,21 @@ st.markdown(
         .status-low { background: rgba(16, 185, 129, 0.12); color: #047857; }
         .status-moderate { background: rgba(245, 158, 11, 0.14); color: #b45309; }
         .status-high { background: rgba(239, 68, 68, 0.12); color: #b91c1c; }
+        div[data-testid="stFileUploaderDropzone"] {
+            border: 1px dashed #60A5FA;
+            border-radius: 14px;
+            background: #EFF6FF;
+        }
+        div[data-testid="stFileUploaderDropzone"]:hover { border-color: #2563EB; }
+        div.stButton > button[kind="primary"] {
+            background: #2563EB;
+            border-color: #2563EB;
+            color: #FFFFFF;
+        }
+        div.stButton > button[kind="primary"]:hover {
+            background: #1D4ED8;
+            border-color: #1D4ED8;
+        }
     </style>
     """,
     unsafe_allow_html=True,
