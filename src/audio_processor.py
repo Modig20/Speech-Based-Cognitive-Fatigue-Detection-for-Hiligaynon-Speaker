@@ -147,8 +147,12 @@ def extract_mel_spectrogram(
     Returns:
         np.ndarray: 2D array of shape (128, 1500) representing log-Mel power.
     """
-    # 1. Load, trim, and normalize waveform
-    y = load_and_trim_audio(audio_source, top_db=top_db)
+    # 1. Decode common WAV inputs directly; use FFmpeg-backed normalization for other formats.
+    try:
+        y = load_and_trim_audio(audio_source, top_db=top_db)
+    except (RuntimeError, ValueError):
+        standardized_audio = standardize_audio(audio_source)
+        y = load_and_trim_audio(standardized_audio, top_db=top_db)
 
     # 2. Enforce 15.0-second fixed duration
     y_fixed = enforce_fixed_duration(y, target_samples=TARGET_SAMPLES)

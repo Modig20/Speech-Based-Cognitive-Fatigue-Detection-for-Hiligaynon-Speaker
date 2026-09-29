@@ -1,7 +1,7 @@
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from src.audio_processor import extract_mel_spectrogram
 
 st.set_page_config(page_title="Researcher Diagnostic Studio", layout="wide")
 
@@ -42,63 +42,44 @@ uploaded_audio = st.file_uploader(
     help="Use a speech sample to inspect model features and fatigue prediction output.",
 )
 
+mel_spectrogram = None
 if uploaded_audio is not None:
-    st.audio(uploaded_audio, format="audio/wav")
+    st.audio(uploaded_audio)
+    try:
+        mel_spectrogram = extract_mel_spectrogram(uploaded_audio)
+    except Exception as exc:
+        st.error(f"Audio processing failed: {exc}")
 
 left, right = st.columns([1.5, 1])
 
 with left:
     st.markdown('<div class="card-panel">', unsafe_allow_html=True)
-    st.subheader("Processing timeline")
-    with st.status("Preparing spectrogram and temporal attention analysis", expanded=True):
-        st.write("1. Audio validation complete")
-        st.write("2. 16 kHz standardization applied")
-        st.write("3. Mel-spectrogram generated")
-        st.write("4. Temporal attention map computed")
+    st.subheader("Audio features")
+    if uploaded_audio is None:
+        st.info("Upload an audio recording to generate its Mel-spectrogram.")
+    elif mel_spectrogram is not None:
+        st.success("Audio processed: 16 kHz mono, voice activity trimmed, and padded or clipped to 15 seconds.")
+        st.caption(f"Mel-spectrogram shape: {mel_spectrogram.shape[0]} bins × {mel_spectrogram.shape[1]} frames")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    spectrogram = np.random.default_rng(7).uniform(0, 1, size=(128, 1500)).astype(float)
-    fig = px.imshow(
-        spectrogram,
-        color_continuous_scale="Viridis",
-        aspect="auto",
-        labels={"x": "Time Frames", "y": "Mel Bins"},
-    )
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, use_container_width=True)
-
-    attention = np.linspace(0.2, 0.95, 1500)
-    attention_fig = px.line(
-        x=list(range(len(attention))),
-        y=attention,
-        labels={"x": "Time Index", "y": "Attention Weight"},
-    )
-    attention_fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(attention_fig, use_container_width=True)
+    if mel_spectrogram is not None:
+        fig = px.imshow(
+            mel_spectrogram,
+            color_continuous_scale="Viridis",
+            aspect="auto",
+            labels={"x": "Time Frames", "y": "Mel Bins", "color": "Power (dB)"},
+        )
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
 
 with right:
     st.markdown('<div class="card-panel">', unsafe_allow_html=True)
     st.subheader("Fatigue classification")
-
-    prediction = "Moderate"
-    confidence = 0.82
-    status_class = "status-moderate"
-
-    if prediction == "Low":
-        status_class = "status-low"
-    elif prediction == "High":
-        status_class = "status-high"
-
-    st.markdown(f'<div class="status-pill {status_class}">{prediction}</div>', unsafe_allow_html=True)
-    st.progress(confidence)
-    st.caption(f"Confidence: {confidence * 100:.1f}%")
-
-    st.metric("Acoustic energy", "−18.4 dB")
-    st.metric("Pitch variability", "27.8 Hz")
-    st.metric("Speech tempo", "3.2 syllables/s")
+    st.info("Prediction and attention analysis are unavailable because a trained model is not connected yet.")
     st.markdown('</div>', unsafe_allow_html=True)
 
-st.subheader("Session explorer")
+st.subheader("Example session data")
+st.caption("Illustrative rows only; these are not participant records.")
 
 session_rows = [
     {
