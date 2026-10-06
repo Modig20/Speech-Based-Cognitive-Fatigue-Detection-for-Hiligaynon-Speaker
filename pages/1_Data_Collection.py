@@ -1,3 +1,8 @@
+from pyexpat import errors
+
+from src.audio_processor import standardize_audio
+from src.database import log_session, save_respondent, upload_audio_blob
+
 import json
 import uuid
 from urllib.error import URLError
@@ -529,6 +534,18 @@ def submit_screening():
 
     st.session_state.screening_errors = errors
     if not errors:
+        # --- Save Respondent to Supabase ---
+        try:
+            save_respondent(
+                respondent_id=st.session_state.respondent_id,
+                birthplace=birthplace,
+                native_lang=native_language,
+                freq_score=st.session_state.hiligaynon_frequency_score,
+            )
+        except Exception as exc:
+            st.session_state.screening_errors = [f"Database connection error: {exc}"]
+            return
+
         st.session_state.current_task_level = TASK_LEVELS[0]
         st.session_state.task_index = 0
         st.session_state.recorded_audio_bytes = None
@@ -568,14 +585,44 @@ def save_rating_and_continue():
     task_level = TASK_LEVELS[st.session_state.task_index]
     if task_level not in st.session_state.task_ratings:
         return
+
     if st.session_state.task_index < len(TASK_LEVELS) - 1:
         st.session_state.task_index += 1
         st.session_state.current_task_level = TASK_LEVELS[st.session_state.task_index]
-        st.session_state.recorded_audio_bytes = st.session_state.task_recordings.get(st.session_state.current_task_level)
+        st.session_state.recorded_audio_bytes = st.session_state.task_recordings.get(
+            st.session_state.current_task_level
+        )
         st.session_state.current_step = 3
     else:
-        st.session_state.current_step = 5
+        # --- Upload all recordings and log sessions before Step 5 ---
+        with st.spinner("Standardizing audio and uploading session data..."):
+            for level in TASK_LEVELS:
+                raw_audio = st.session_state.task_recordings.get(level)
+                rating = st.session_state.task_ratings.get(level)
 
+                if raw_audio is not None and rating is not None:
+                    try:
+                        # 1. Standardize in-memory to 16 kHz mono WAV
+                        wav_bytes = standardize_audio(raw_audio)
+
+                        # 2. Upload blob to Supabase Storage
+                        filename = f"{st.session_state.respondent_id}_{level}_{st.session_state.session_id}.wav"
+                        audio_url = upload_audio_blob(wav_bytes, filename)
+
+                        # 3. Insert record into fatigue_session table
+                        log_session(
+                            respondent_id=st.session_state.respondent_id,
+                            task_level=level,
+                            ground_truth=rating,
+                            predicted=None,
+                            audio_url=audio_url,
+                            session_id=st.session_state.session_id,
+                        )
+                    except Exception as exc:
+                        st.error(f"Failed to sync task '{level}': {exc}")
+                        return
+
+        st.session_state.current_step = 5
 
 def finish_debrief():
     if st.session_state.post_debrief_choice == "decline":

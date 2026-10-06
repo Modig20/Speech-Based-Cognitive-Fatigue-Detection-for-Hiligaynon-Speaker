@@ -2,6 +2,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from src.audio_processor import extract_mel_spectrogram
+from src.database import fetch_all_sessions
 
 st.set_page_config(page_title="Researcher Diagnostic Studio", layout="wide")
 
@@ -96,40 +97,23 @@ with right:
     st.info("Prediction and attention analysis are unavailable because a trained model is not connected yet.")
     st.markdown('</div>', unsafe_allow_html=True)
 
-st.subheader("Example session data")
-st.caption("Illustrative rows only; these are not participant records.")
+st.subheader("Live Session Database")
+st.caption("Synchronized with Supabase `fatigue_session` table.")
 
-session_rows = [
-    {
-        "session_id": "A-001",
-        "respondent_id": "WVSU_CS_001",
-        "task_level": "Easy",
-        "ground_truth_score": 3,
-        "predicted_fatigue": "Low",
-    },
-    {
-        "session_id": "A-002",
-        "respondent_id": "WVSU_CS_002",
-        "task_level": "Moderate",
-        "ground_truth_score": 5,
-        "predicted_fatigue": "Moderate",
-    },
-    {
-        "session_id": "A-003",
-        "respondent_id": "WVSU_CS_003",
-        "task_level": "Intensive",
-        "ground_truth_score": 6,
-        "predicted_fatigue": "High",
-    },
-]
+try:
+    session_df = fetch_all_sessions()
+except Exception as exc:
+    st.error(f"Failed to fetch session records: {exc}")
+    session_df = pd.DataFrame()
 
-session_df = pd.DataFrame(session_rows)
-filtered_df = st.dataframe(session_df, use_container_width=True)
-
-csv = session_df.to_csv(index=False).encode("utf-8")
-st.download_button(
-    label="Download dataset (.CSV)",
-    data=csv,
-    file_name="fatigue_session_logs.csv",
-    mime="text/csv",
-)
+if session_df.empty:
+    st.info("No participant sessions logged yet.")
+else:
+    st.dataframe(session_df, use_container_width=True)
+    csv = session_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="Download dataset (.CSV)",
+        data=csv,
+        file_name="fatigue_session_logs.csv",
+        mime="text/csv",
+    )

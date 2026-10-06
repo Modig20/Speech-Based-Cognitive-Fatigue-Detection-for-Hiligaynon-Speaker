@@ -16,6 +16,8 @@ Thesis Tasks.docx
 
 # Streamlit secrets (NEVER commit credentials)
 .streamlit/secrets.toml
+secrets.toml
+*.env
 
 # Audio files (prevent repo bloat; stored in Supabase)
 *.wav
