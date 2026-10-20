@@ -27,7 +27,7 @@ secrets.toml
 *.flac
 
 # Deep learning models & checkpoints
-*.keras
+# Removed keras
 *.h5
 *.tflite
 *.ckpt

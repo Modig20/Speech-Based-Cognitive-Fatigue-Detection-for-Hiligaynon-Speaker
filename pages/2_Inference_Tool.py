@@ -78,8 +78,9 @@ def load_fatigue_model():
         return None
     try:
         custom_objects = {"TemporalAttention": TemporalAttention} if TemporalAttention else {}
-        return tf.keras.models.load_model(MODEL_PATH, custom_objects=custom_objects)
-    except Exception:
+        return tf.keras.models.load_model(MODEL_PATH, custom_objects=custom_objects, compile=False)
+    except Exception as exc:
+        st.sidebar.error(f"Model load error: {exc}")
         return None
     
 uploaded_audio = st.file_uploader(
