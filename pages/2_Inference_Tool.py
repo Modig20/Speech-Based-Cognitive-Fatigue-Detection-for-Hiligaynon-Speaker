@@ -1,11 +1,35 @@
+import os
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from src.audio_processor import extract_mel_spectrogram
+from src.audio_processor import TARGET_DURATION, extract_mel_spectrogram, prepare_model_tensor
 from src.database import fetch_all_sessions
 
 st.set_page_config(page_title="Researcher Diagnostic Studio", layout="wide")
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODEL_PATH = Path(os.environ.get("FATIGUE_MODEL_PATH", "fatigue_cnn_attention.keras"))
+if not MODEL_PATH.is_absolute():
+    MODEL_PATH = PROJECT_ROOT / MODEL_PATH
+
+
+@st.cache_resource(show_spinner="Loading fatigue detection model...")
+def load_inference_model(model_path: str):
+    import tensorflow as tf
+
+    from src.model_architecture import TemporalAttention, get_inference_model
+
+    trained_model = tf.keras.models.load_model(
+        model_path,
+        custom_objects={"TemporalAttention": TemporalAttention},
+        compile=False,
+    )
+    return get_inference_model(trained_model)
+
 
 st.markdown(
     """
@@ -63,6 +87,8 @@ uploaded_audio = st.file_uploader(
 )
 
 mel_spectrogram = None
+prediction = None
+attention = None
 if uploaded_audio is not None:
     st.audio(uploaded_audio)
     try:
@@ -70,6 +96,46 @@ if uploaded_audio is not None:
             mel_spectrogram = extract_mel_spectrogram(uploaded_audio)
     except Exception as exc:
         st.error(f"Audio processing failed: {exc}")
+    else:
+        if MODEL_PATH.is_file():
+            try:
+                inference_model = load_inference_model(str(MODEL_PATH))
+                model_input = prepare_model_tensor(mel_spectrogram)
+                class_probabilities, attention_weights = inference_model.predict(
+                    model_input,
+                    verbose=0,
+                )
+                class_probabilities = np.asarray(class_probabilities)
+                attention_weights = np.asarray(attention_weights)
+
+                if class_probabilities.shape != (1, 3):
+                    raise ValueError(
+                        "The model must return probabilities for Low, Moderate, and High fatigue."
+                    )
+                if (
+                    np.any(class_probabilities < 0)
+                    or np.any(class_probabilities > 1)
+                    or not np.isclose(class_probabilities.sum(), 1.0, atol=1e-3)
+                ):
+                    raise ValueError("The model returned invalid class confidence scores.")
+                if attention_weights.ndim != 2 or attention_weights.shape[0] != 1:
+                    raise ValueError("The model returned an invalid temporal attention shape.")
+                if (
+                    attention_weights.shape[1] == 0
+                    or np.any(attention_weights < 0)
+                    or not np.isclose(attention_weights.sum(), 1.0, atol=1e-3)
+                ):
+                    raise ValueError("The model returned invalid temporal attention weights.")
+                if (
+                    not np.isfinite(class_probabilities).all()
+                    or not np.isfinite(attention_weights).all()
+                ):
+                    raise ValueError("The model returned non-finite inference values.")
+
+                prediction = class_probabilities[0]
+                attention = attention_weights[0]
+            except (OSError, ValueError, TypeError, RuntimeError) as exc:
+                st.error(f"Model analysis failed: {exc}")
 
 left, right = st.columns([1.5, 1])
 
@@ -96,8 +162,46 @@ with left:
 with right:
     st.markdown('<div class="card-panel">', unsafe_allow_html=True)
     st.subheader("Fatigue classification")
-    st.info("Prediction and attention analysis are unavailable because a trained model is not connected yet.")
+    if uploaded_audio is None:
+        st.info("Upload an audio recording to run fatigue classification.")
+    elif not MODEL_PATH.is_file():
+        st.warning(
+            "A trained model is not available. Add "
+            "`fatigue_cnn_attention.keras` to the project root or set "
+            "`FATIGUE_MODEL_PATH` to the model file to enable classification, "
+            "confidence scores, and temporal attention."
+        )
+    elif prediction is not None:
+        class_labels = ["Low", "Moderate", "High"]
+        predicted_index = int(np.argmax(prediction))
+        st.metric("Predicted fatigue level", class_labels[predicted_index])
+        st.metric("Prediction confidence", f"{prediction[predicted_index]:.1%}")
+        st.caption("Model confidence by fatigue class")
+        for label, confidence in zip(class_labels, prediction):
+            st.progress(float(confidence), text=f"{label}: {confidence:.1%}")
     st.markdown('</div>', unsafe_allow_html=True)
+
+if attention is not None:
+    st.subheader("Temporal attention")
+    attention_times = (
+        np.arange(len(attention), dtype=np.float32) + 0.5
+    ) * TARGET_DURATION / len(attention)
+    attention_df = pd.DataFrame(
+        {"Time (seconds)": attention_times, "Attention weight": attention}
+    )
+    attention_fig = px.area(
+        attention_df,
+        x="Time (seconds)",
+        y="Attention weight",
+        labels={"Attention weight": "Relative importance"},
+        title="Model attention across the 15-second audio window",
+    )
+    attention_fig.update_layout(margin=dict(l=10, r=10, t=50, b=10))
+    st.plotly_chart(attention_fig, use_container_width=True)
+    st.caption(
+        "Higher weights indicate time steps that contributed more to this model output; "
+        "they are relative attention values, not calibrated confidence."
+    )
 
 st.subheader("Live session table")
 

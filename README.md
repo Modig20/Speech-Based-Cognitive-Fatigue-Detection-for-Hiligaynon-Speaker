@@ -24,3 +24,7 @@ git clone [https://github.com/ZenzenAnthony/Speech-Based-Cognitive-Fatigue-Detec
 cd Speech-Based-Cognitive-Fatigue-Detection-for-Hiligaynon-Speaker
 python -m venv venv
 .\venv\Scripts\Activate.ps1
+```
+
+### 2. Enable Researcher Diagnostic Studio inference
+Place the trained `fatigue_cnn_attention.keras` model in the project root. The Researcher Diagnostic Studio will then show the predicted fatigue class, confidence scores for Low/Moderate/High, and a temporal-attention plot after audio analysis completes. To use a model stored elsewhere, set `FATIGUE_MODEL_PATH` to its path before starting Streamlit. Model files are excluded from Git, so they must be provided separately.
