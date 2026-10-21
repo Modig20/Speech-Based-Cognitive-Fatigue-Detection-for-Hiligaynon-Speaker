@@ -69,6 +69,7 @@ class TemporalAttention(layers.Layer):
         return config
 
 
+# In src/model_architecture.py -> Replace build_fatigue_model() with:
 def build_fatigue_model(
     input_shape: Tuple[int, int, int] = (128, 1500, 1),
     num_classes: int = 3,
@@ -76,19 +77,13 @@ def build_fatigue_model(
     return_attention: bool = False,
 ) -> Model:
     """
-    Builds the Conv2D + Temporal Attention architecture.
-
-    Parameters:
-        input_shape: Dimensions of normalized Mel-spectrogram (n_mels, frames, channels).
-        num_classes: Classification output nodes (Low, Moderate, High).
-        l2_reg: Weight decay factor for convolutional and dense kernels.
-        return_attention: When True, model returns [class_probs, attention_weights].
-                          When False, returns class_probs for standard training.
-
-    Returns:
-        tf.keras.Model: Configured Keras computational graph.
+    Builds the Conv2D + Temporal Attention architecture with linear rescaling
+    and frequency average pooling for the 15-participant cohort.
     """
     inputs = layers.Input(shape=input_shape, name="mel_spectrogram_input")
+
+    # Proportional linear scaling from [-80, 0] dB to [0.0, 1.0]
+    x = layers.Rescaling(scale=1.0 / 80.0, offset=1.0, name="db_rescaling")(inputs)
 
     # --- Convolutional Block 1 ---
     x = layers.Conv2D(
@@ -97,7 +92,7 @@ def build_fatigue_model(
         padding="same",
         kernel_regularizer=regularizers.l2(l2_reg),
         name="conv2d_block1",
-    )(inputs)
+    )(x)
     x = layers.BatchNormalization(name="bn_block1")(x)
     x = layers.Activation("relu", name="relu_block1")(x)
     x = layers.MaxPooling2D(pool_size=(2, 2), name="maxpool_block1")(x)
@@ -116,12 +111,10 @@ def build_fatigue_model(
     x = layers.MaxPooling2D(pool_size=(2, 2), name="maxpool_block2")(x)
     x = layers.Dropout(0.2, name="dropout_block2")(x)
 
-    # --- Feature Alignment & Reshape for Temporal Sequence ---
-    # Shape transition: (batch, freq, time, channels) -> (batch, time, freq, channels)
-    x = layers.Permute((2, 1, 3), name="permute_time_first")(x)
-    time_steps = x.shape[1]
-    feature_dim = x.shape[2] * x.shape[3]
-    x = layers.Reshape((time_steps, feature_dim), name="flatten_spatial")(x)
+    # --- Frequency Average Pooling & Temporal Sequence Alignment ---
+    # Collapses 32 frequency bins -> (batch, 1, 375, 64) -> (batch, 375, 64)
+    x = layers.AveragePooling2D(pool_size=(32, 1), name="freq_avg_pool")(x)
+    x = layers.Reshape((375, 64), name="flatten_spatial")(x)
 
     # --- Temporal Attention Layer ---
     context_vector, attention_weights = TemporalAttention(
@@ -147,7 +140,6 @@ def build_fatigue_model(
             name="fatigue_cnn_attention_inference",
         )
     return Model(inputs=inputs, outputs=outputs, name="fatigue_cnn_attention_training")
-
 
 def get_inference_model(trained_model: Model) -> Model:
     """
