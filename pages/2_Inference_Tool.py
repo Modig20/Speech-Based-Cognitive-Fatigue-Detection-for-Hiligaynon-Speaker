@@ -11,6 +11,27 @@ from src.database import fetch_all_sessions
 
 st.set_page_config(page_title="Researcher Diagnostic Studio", layout="wide")
 
+CLASS_DETAILS = [
+    {
+        "label": "Low Fatigue",
+        "hiligaynon": "Gamay lang nga kapoy",
+        "scale": "Samn-Perelli 1–2",
+        "description": "Rested, alert state.",
+    },
+    {
+        "label": "Moderate Fatigue",
+        "hiligaynon": "Sakto-sakto nga kapoy",
+        "scale": "Samn-Perelli 3–4",
+        "description": "Mild fatigue, reduced freshness.",
+    },
+    {
+        "label": "High Fatigue",
+        "hiligaynon": "Grabe nga kapoy",
+        "scale": "Samn-Perelli 5–7",
+        "description": "Pronounced mental exhaustion, difficulty concentrating.",
+    },
+]
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATH = Path(os.environ.get("FATIGUE_MODEL_PATH", "fatigue_cnn_attention.keras"))
 if not MODEL_PATH.is_absolute():
@@ -89,6 +110,7 @@ uploaded_audio = st.file_uploader(
 mel_spectrogram = None
 prediction = None
 attention = None
+peak_attention_time = None
 if uploaded_audio is not None:
     st.audio(uploaded_audio)
     try:
@@ -134,20 +156,23 @@ if uploaded_audio is not None:
 
                 prediction = class_probabilities[0]
                 attention = attention_weights[0]
+                peak_attention_index = int(np.argmax(attention))
+                peak_attention_time = (
+                    (peak_attention_index + 0.5) * TARGET_DURATION / len(attention)
+                )
             except (OSError, ValueError, TypeError, RuntimeError) as exc:
                 st.error(f"Model analysis failed: {exc}")
 
 left, right = st.columns([1.5, 1])
 
 with left:
-    st.markdown('<div class="card-panel">', unsafe_allow_html=True)
-    st.subheader("Audio features")
-    if uploaded_audio is None:
-        st.info("Upload an audio recording to generate its Mel-spectrogram.")
-    elif mel_spectrogram is not None:
-        st.success("Audio processed: 16 kHz mono, voice activity trimmed, and padded or clipped to 15 seconds.")
-        st.caption(f"Mel-spectrogram shape: {mel_spectrogram.shape[0]} bins × {mel_spectrogram.shape[1]} frames")
-    st.markdown('</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.subheader("Audio features")
+        if uploaded_audio is None:
+            st.info("Upload an audio recording to generate its Mel-spectrogram.")
+        elif mel_spectrogram is not None:
+            st.success("Audio processed: 16 kHz mono, voice activity trimmed, and padded or clipped to 15 seconds.")
+            st.caption(f"Mel-spectrogram shape: {mel_spectrogram.shape[0]} bins × {mel_spectrogram.shape[1]} frames")
 
     if mel_spectrogram is not None:
         fig = px.imshow(
@@ -160,47 +185,130 @@ with left:
         st.plotly_chart(fig, use_container_width=True)
 
 with right:
-    st.markdown('<div class="card-panel">', unsafe_allow_html=True)
-    st.subheader("Fatigue classification")
-    if uploaded_audio is None:
-        st.info("Upload an audio recording to run fatigue classification.")
-    elif not MODEL_PATH.is_file():
-        st.warning(
-            "A trained model is not available. Add "
-            "`fatigue_cnn_attention.keras` to the project root or set "
-            "`FATIGUE_MODEL_PATH` to the model file to enable classification, "
-            "confidence scores, and temporal attention."
-        )
-    elif prediction is not None:
-        class_labels = ["Low", "Moderate", "High"]
-        predicted_index = int(np.argmax(prediction))
-        st.metric("Predicted fatigue level", class_labels[predicted_index])
-        st.metric("Prediction confidence", f"{prediction[predicted_index]:.1%}")
-        st.caption("Model confidence by fatigue class")
-        for label, confidence in zip(class_labels, prediction):
-            st.progress(float(confidence), text=f"{label}: {confidence:.1%}")
-    st.markdown('</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.subheader("Fatigue classification")
+        if uploaded_audio is None:
+            st.info("Upload an audio recording to run fatigue classification.")
+        elif not MODEL_PATH.is_file():
+            st.warning(
+                "A trained model is not available. Add "
+                "`fatigue_cnn_attention.keras` to the project root or set "
+                "`FATIGUE_MODEL_PATH` to the model file to enable classification, "
+                "confidence scores, and temporal attention."
+            )
+        elif prediction is not None:
+            predicted_index = int(np.argmax(prediction))
+            predicted_class = CLASS_DETAILS[predicted_index]
+            st.metric("Predicted fatigue level", predicted_class["label"])
+            st.metric("Prediction confidence", f"{prediction[predicted_index]:.1%}")
+            st.caption("Interactive class probabilities (hover over a bar for the exact score)")
+            confidence_df = pd.DataFrame(
+                {
+                    "Fatigue level": [item["label"] for item in CLASS_DETAILS],
+                    "Probability": prediction,
+                }
+            )
+            confidence_fig = px.bar(
+                confidence_df,
+                x="Probability",
+                y="Fatigue level",
+                orientation="h",
+                color="Fatigue level",
+                color_discrete_sequence=["#10B981", "#F59E0B", "#EF4444"],
+                category_orders={
+                    "Fatigue level": [
+                        item["label"] for item in reversed(CLASS_DETAILS)
+                    ]
+                },
+                text=confidence_df["Probability"].map(lambda value: f"{value:.1%}"),
+                hover_data={"Probability": ":.2%", "Fatigue level": True},
+            )
+            confidence_fig.update_layout(
+                xaxis=dict(title="Model probability", range=[0, 1], tickformat=".0%"),
+                yaxis_title=None,
+                showlegend=False,
+                margin=dict(l=10, r=10, t=10, b=10),
+            )
+            confidence_fig.update_traces(
+                textposition="outside",
+                hovertemplate="%{y}: %{x:.2%}<extra></extra>",
+            )
+            st.plotly_chart(confidence_fig, use_container_width=True)
+
+if prediction is not None:
+    with st.container(border=True):
+        st.subheader("Fatigue scale reference")
+        detail_columns = st.columns(3)
+        for column, detail in zip(detail_columns, CLASS_DETAILS):
+            with column:
+                with st.container(border=True):
+                    st.markdown(f"**{detail['label']}**")
+                    st.caption(detail["hiligaynon"])
+                    st.markdown(f"`{detail['scale']}`")
+                    st.caption(detail["description"])
 
 if attention is not None:
-    st.subheader("Temporal attention")
-    attention_times = (
-        np.arange(len(attention), dtype=np.float32) + 0.5
-    ) * TARGET_DURATION / len(attention)
-    attention_df = pd.DataFrame(
-        {"Time (seconds)": attention_times, "Attention weight": attention}
-    )
-    attention_fig = px.area(
-        attention_df,
-        x="Time (seconds)",
-        y="Attention weight",
-        labels={"Attention weight": "Relative importance"},
-        title="Model attention across the 15-second audio window",
-    )
-    attention_fig.update_layout(margin=dict(l=10, r=10, t=50, b=10))
-    st.plotly_chart(attention_fig, use_container_width=True)
-    st.caption(
-        "Higher weights indicate time steps that contributed more to this model output; "
-        "they are relative attention values, not calibrated confidence."
+    with st.container(border=True):
+        st.subheader("Temporal attention")
+        st.metric(
+            "Peak attention timestamp",
+            f"{peak_attention_time:.3f} s",
+            help="Center timestamp of the model attention bin with the highest relative weight.",
+        )
+        attention_times = (
+            np.arange(len(attention), dtype=np.float32) + 0.5
+        ) * TARGET_DURATION / len(attention)
+        attention_df = pd.DataFrame(
+            {"Time (seconds)": attention_times, "Attention weight": attention}
+        )
+        attention_fig = px.area(
+            attention_df,
+            x="Time (seconds)",
+            y="Attention weight",
+            labels={"Attention weight": "Relative importance"},
+            title="Model attention across the 15-second audio window",
+        )
+        attention_fig.add_scatter(
+            x=[peak_attention_time],
+            y=[attention[int(np.argmax(attention))]],
+            mode="markers",
+            name="Peak attention",
+            marker={"color": "#DC2626", "size": 10, "symbol": "diamond"},
+            hovertemplate=(
+                f"Peak attention: {peak_attention_time:.3f} s"
+                "<br>Relative weight: %{y:.4f}<extra></extra>"
+            ),
+        )
+        attention_fig.update_layout(margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(attention_fig, use_container_width=True)
+        st.caption(
+            "The timestamp marks the center of the highest-weight attention bin. "
+            "Attention weights show relative model focus, not calibrated confidence "
+            "or clinical proof that fatigue markers occurred at that instant."
+        )
+
+with st.expander("Researcher interpretation guide"):
+    st.markdown(
+        """
+        **Mel-spectrogram (128 Mel bins):** The vertical axis groups acoustic
+        energy into 128 perceptually spaced frequency bands; the horizontal axis
+        represents time across the standardized 15-second clip. Brighter or
+        higher-energy regions indicate stronger signal energy in those bands.
+        This view is a model input representation, not a transcript or a direct
+        measurement of fatigue.
+
+        **Temporal attention:** The curve shows how the model distributes its
+        relative attention across time steps while forming its prediction. The
+        peak timestamp is the center of the bin with the largest attention
+        weight. Attention is model-relative and should not be interpreted as a
+        calibrated confidence score, causal explanation, or clinically validated
+        localization of fatigue.
+
+        **Class probabilities:** The three bars show the model's output
+        probabilities for the Low, Moderate, and High classes. They are model
+        scores, not a diagnosis. The Samn–Perelli ranges shown in the reference
+        cards explain the study's class mapping.
+        """
     )
 
 st.subheader("Live session table")
