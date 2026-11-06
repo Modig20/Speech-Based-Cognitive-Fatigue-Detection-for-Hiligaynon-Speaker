@@ -44,11 +44,17 @@ def load_inference_model(model_path: str):
 
     from src.model_architecture import TemporalAttention, get_inference_model
 
+    custom_objects = {
+        "TemporalAttention": TemporalAttention,
+        "CustomLayers>TemporalAttention": TemporalAttention,
+    }
     trained_model = tf.keras.models.load_model(
         model_path,
-        custom_objects={"TemporalAttention": TemporalAttention},
+        custom_objects=custom_objects,
         compile=False,
     )
+    if len(trained_model.outputs) == 2:
+        return trained_model
     return get_inference_model(trained_model)
 
 
@@ -100,6 +106,35 @@ st.markdown(
 
 st.title("Researcher Diagnostic Studio")
 st.caption("Audio review, Mel-spectrogram analysis, attention diagnostics, and logged sessions")
+
+
+def summarize_mel_spectrogram(mel_array: np.ndarray):
+    """Extract objective spectrogram statistics for the currently uploaded clip."""
+    if mel_array is None or mel_array.size == 0:
+        return {
+            "peak_db": 0.0,
+            "mean_db": 0.0,
+            "low_freq_mean_db": 0.0,
+            "high_freq_mean_db": 0.0,
+            "quiet_frame_pct": 0.0,
+            "quiet_threshold_db": 0.0,
+        }
+
+    frame_energy = mel_array.mean(axis=0)
+    quiet_threshold = float(np.quantile(frame_energy, 0.15))
+    quiet_frames = frame_energy <= quiet_threshold
+    lower_rows = mel_array[:40, :]
+    upper_rows = mel_array[40:, :]
+
+    return {
+        "peak_db": float(np.max(mel_array)),
+        "mean_db": float(np.mean(mel_array)),
+        "low_freq_mean_db": float(np.mean(lower_rows)),
+        "high_freq_mean_db": float(np.mean(upper_rows)),
+        "quiet_frame_pct": float(np.mean(quiet_frames) * 100.0),
+        "quiet_threshold_db": float(quiet_threshold),
+    }
+
 
 uploaded_audio = st.file_uploader(
     "Upload recorded audio",
@@ -184,6 +219,26 @@ with left:
         fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
+        mel_stats = summarize_mel_spectrogram(mel_spectrogram)
+        with st.container(border=True):
+            st.subheader("Graph interpretation")
+            st.markdown(
+                f"**Peak dB:** {mel_stats['peak_db']:.2f} dB  |  "
+                f"**Mean dB:** {mel_stats['mean_db']:.2f} dB"
+            )
+            st.caption(
+                "Bright yellow/white regions indicate strong vocal energy and more audible phonation; "
+                "dark purple regions indicate lower energy, reduced vocal intensity, or pauses/silence."
+            )
+            st.markdown(
+                f"**Lower Mel bins (rows 1–40):** mean {mel_stats['low_freq_mean_db']:.2f} dB — these bins emphasize the lower vocal spectrum and the fundamental pitch region (F0 / base vocal tone).\n\n"
+                f"**Upper Mel bins (rows 41–128):** mean {mel_stats['high_freq_mean_db']:.2f} dB — these bins capture upper harmonics, breathier texture, and higher resonance energy."
+            )
+            st.markdown(
+                f"**Silent / low-energy frames:** {mel_stats['quiet_frame_pct']:.1f}% of the 1,500 time columns fall at or below the file-specific threshold of {mel_stats['quiet_threshold_db']:.2f} dB. "
+                "This approximates hesitation pauses, breath gaps, or sigh-like low-energy moments (aguy-hoy)."
+            )
+
 with right:
     with st.container(border=True):
         st.subheader("Fatigue classification")
@@ -235,6 +290,47 @@ with right:
             )
             st.plotly_chart(confidence_fig, use_container_width=True)
 
+            sorted_probs = np.sort(prediction)[::-1]
+            top_gap = float(sorted_probs[0] - sorted_probs[1])
+            if top_gap <= 0.15:
+                st.warning(
+                    "Borderline / transitional classification: the top two fatigue probabilities are within 15% of each other "
+                    f"(gap = {top_gap:.2%}), so this sample may sit near a decision boundary between classes."
+                )
+            else:
+                st.success(
+                    f"Decision confidence gap: {top_gap:.2%} between the top two classes; the prediction is relatively stable."
+                )
+
+            recommendation_map = {
+                "Low Fatigue": {
+                    "kind": "info",
+                    "title": "Low fatigue: maintain steady performance",
+                    "body": "Keep your pacing stable and continue current task flow, but use brief hydration and micro-recovery breaks every 25–40 minutes to protect attention quality.",
+                },
+                "Moderate Fatigue": {
+                    "kind": "warning",
+                    "title": "Moderate fatigue: reduce cognitive load",
+                    "body": "Break the next task into smaller steps, reduce screen-heavy work, and use a 3–5 minute structured pause every 15–20 minutes. Simple breathing, standing movement, and brief task switching can help restore alertness.",
+                },
+                "High Fatigue": {
+                    "kind": "error",
+                    "title": "High fatigue: prioritize rest and support",
+                    "body": "Pause demanding tasks immediately, rest in a quiet environment, and consider professional guidance if this pattern persists. Persistent high fatigue is a signal to reduce workload and seek support from a guidance counselor or qualified clinician.",
+                },
+            }
+            recommendation = recommendation_map.get(predicted_class["label"], recommendation_map["Moderate Fatigue"])
+            if recommendation["kind"] == "info":
+                st.info(f"**{recommendation['title']}**\n\n{recommendation['body']}")
+            elif recommendation["kind"] == "warning":
+                st.warning(f"**{recommendation['title']}**\n\n{recommendation['body']}")
+            else:
+                st.error(f"**{recommendation['title']}**\n\n{recommendation['body']}")
+            st.caption(
+                "This output is a speech-based acoustic screening result only and is not a clinical or medical diagnosis. "
+                "It may help researchers or supervisors notice a possible fatigue trend, but formal diagnosis should use clinical assessment and context."
+            )
+
 if prediction is not None:
     with st.container(border=True):
         st.subheader("Fatigue scale reference")
@@ -250,10 +346,18 @@ if prediction is not None:
 if attention is not None:
     with st.container(border=True):
         st.subheader("Temporal attention")
+        peak_attention_weight = float(np.max(attention))
         st.metric(
             "Peak attention timestamp",
             f"{peak_attention_time:.3f} s",
             help="Center timestamp of the model attention bin with the highest relative weight.",
+        )
+        st.markdown(
+            f"**Peak attention weight:** {peak_attention_weight:.4f}  |  **Exact focus time:** {peak_attention_time:.3f} s of the 15.0 s window"
+        )
+        st.caption(
+            "The neural network prioritized this specific second because it contains the strongest relative acoustic pattern in the input sequence, "
+            "which usually corresponds to the most informative vocal segment for the fatigue decision."
         )
         attention_times = (
             np.arange(len(attention), dtype=np.float32) + 0.5
@@ -270,7 +374,7 @@ if attention is not None:
         )
         attention_fig.add_scatter(
             x=[peak_attention_time],
-            y=[attention[int(np.argmax(attention))]],
+            y=[peak_attention_weight],
             mode="markers",
             name="Peak attention",
             marker={"color": "#DC2626", "size": 10, "symbol": "diamond"},
